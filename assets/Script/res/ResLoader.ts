@@ -1,5 +1,6 @@
 import { ResLeakChecker } from "./ResLeakChecker";
 import { ResUtil } from "./ResUtil";
+import ResKeeper from "./ResKeeper";
 
 /**
  * 资源加载类
@@ -24,13 +25,13 @@ export interface CacheInfo {
 }
 
 // LoadRes方法的参数结构
-export interface LoadResArgs {
-    url?: string,
-    urls?: string[],
-    type?: typeof cc.Asset,
-    onCompleted?: (CompletedCallback | CompletedArrayCallback),
-    onProgess?: ProcessCallback,
-    use?: string,
+export class LoadResArgs {
+    url?: string;
+    urls?: string[];
+    type?: typeof cc.Asset;
+    onCompleted?: (CompletedCallback | CompletedArrayCallback);
+    onProgess?: ProcessCallback;
+    use?: string;
 }
 
 // ReleaseRes方法的参数结构
@@ -56,6 +57,7 @@ export default class ResLoader {
     private _globalUseId: number = 0;
     private _lastScene: string = null;
     private _sceneDepends: string[] = null;
+    private _sceneResKeeper: ResKeeper = new ResKeeper();
     public resLeakChecker: ResLeakChecker = null;
 
     public static getSceneUseKey() {
@@ -70,6 +72,7 @@ export default class ResLoader {
         }
         // 2. 监听场景切换
         cc.director.on(cc.Director.EVENT_BEFORE_SCENE_LAUNCH, (scene) => {
+            this._sceneResKeeper.releaseAutoRes();
             this._cacheScene(scene);
         });
     }
@@ -100,7 +103,12 @@ export default class ResLoader {
             return null;
         }
 
+        if (arguments.length == 1 && (arguments[0] instanceof LoadResArgs)) {
+            return arguments[0];
+        }
+
         let ret: LoadResArgs = {};
+
         if (typeof arguments[0] == "string") {
             ret.url = arguments[0];
         } else if (arguments[0] instanceof Array) {
@@ -158,6 +166,13 @@ export default class ResLoader {
     }
 
     /**
+     * 场景的默认ResKeeper，由于最顶层的场景节点无法挂载组件，所以在这里维护一个
+     */
+    public getResKeeper() {
+        return this._sceneResKeeper;
+    }
+
+    /**
      * 生成一个资源使用Key
      * @param where 在哪里使用，如Scene、UI、Pool
      * @param who 使用者，如Login、UIHelp...
@@ -189,15 +204,28 @@ export default class ResLoader {
     }
 
     /**
-     * 获取资源的url
+     * 获取资源的reference url
      * @param asset 
      */
-    public getUrlByAsset(asset: cc.Asset): string {
+    public getResKeyByAsset(asset: cc.Asset): string {
         let checkAsset: any = asset;
         if (checkAsset && checkAsset._uuid) {
             return ccloader._getReferenceKey(checkAsset._uuid);;
         }
-        console.error(`getUrlByAssets error ${asset}`);
+        console.error(`getResKeyByAsset error ${asset}`);
+        return null;
+    }
+
+    /**
+     * 获取源url对应的reference url
+     * @param url 
+     * @param type 
+     */
+    public getResKeyByUrl(url: string, type: typeof cc.Asset): string {
+        let uuid = ccloader._getResUuid(url, type, false);
+        if (uuid) {
+            return ccloader._getReferenceKey(uuid);
+        }
         return null;
     }
 
@@ -326,11 +354,12 @@ export default class ResLoader {
         if (scene.name == this._lastScene) {
             return;
         }
-
+        // 获取场景资源（这只对预加载场景有效）
         let refKey = ccloader._getReferenceKey(scene.uuid);
         let item = ccloader._cache[refKey];
         let newUseKey = `@Scene${this.nextUseKey()}`;
         let depends: string[] = null;
+        // 获取新场景的依赖
         if (item) {
             depends = this._cacheSceneDepend(item.dependKeys, newUseKey);
         } else if(scene["dependAssets"]) {
@@ -339,6 +368,7 @@ export default class ResLoader {
             console.error(`cache scene faile ${scene}`);
             return;
         }
+        // 释放旧场景的依赖
         this._releaseSceneDepend();
         this._lastScene = scene.name;
         ResLoader._sceneUseKey = newUseKey;
@@ -353,6 +383,7 @@ export default class ResLoader {
      * @param onCompleted   加载完成回调
      * @param use           资源使用key，根据makeUseKey方法生成
      */
+    public loadRes(resArgs: LoadResArgs)
     public loadRes(url: string, use?: string);
     public loadRes(url: string, onCompleted: CompletedCallback, use?: string);
     public loadRes(url: string, onProgess: ProcessCallback, onCompleted: CompletedCallback, use?: string);
@@ -546,19 +577,6 @@ export default class ResLoader {
             }
             this._resMap.delete(item.id);
         }
-    }
-
-    private _isSceneDepend(itemUrl) {
-        let scene: any = cc.director.getScene();
-        if (!scene) {
-            return false;
-        }
-        let len = scene.dependAssets.length;
-        for (let i = 0; i < len; ++i) {
-            if (scene.dependAssets[i] == itemUrl)
-                return true;
-        }
-        return false;
     }
 
     /**
